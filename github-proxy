@@ -389,11 +389,12 @@ def abstract_path(path):
         context=thiscontext
     )
     resp = jsonify(data)
+    whitelist = ['ETag', 'Link']
     for k,v in headers.items():
-        if not k.startswith('X-'):
+        if not k.startswith('X-') and k not in whitelist:
             continue
-        resp.headers[k] = v
-    resp.headers['ETag'] = headers.get('ETag', DEFAULT_ETAG)
+        resp.headers.set(k, v)
+    #pprint(dict(resp.headers))
     return resp
 
 
