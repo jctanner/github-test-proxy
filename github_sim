@@ -1,0 +1,437 @@
+#!/usr/bin/env python
+
+
+import argparse
+import datetime
+import glob
+import gzip
+import hashlib
+import json
+import os
+import pickle
+import random
+import requests
+import six
+import subprocess
+import time
+
+from logzero import logger
+from pprint import pprint
+from flask import Flask
+from flask import jsonify
+from flask import request
+
+
+app = Flask(__name__)
+
+
+BASEURL = 'http://localhost:5000'
+ERROR_TIMER = 0
+
+TOKENS = {
+    'AAA': 'ansibot'
+}
+
+ANSIBLE_PROJECT_ID = u'573f79d02a8192902e20e34b'
+SHIPPABLE_URL = u'https://api.shippable.com'
+ANSIBLE_PROVIDER_ID = u'562dbd9710c5980d003b0451'
+ANSIBLE_RUNS_URL = u'%s/runs?projectIds=%s&isPullRequest=True' % (
+    SHIPPABLE_URL,
+    ANSIBLE_PROJECT_ID
+)
+
+DEFAULT_ETAG = 'a00049ba79152d03380c34652f2cb612'
+
+# https://elasticread.eng.ansible.com/ansible-issues/_search
+# https://elasticread.eng.ansible.com/ansible-pull-requests/_search
+#	?q=lucene_syntax_here
+#	_search accepts POST
+
+########################################################
+#   MOCK 
+########################################################
+
+class RequestNotCachedException(Exception):
+    pass
+
+
+def get_timestamp():
+    # 2018-10-15T21:21:48.150184
+    # 2018-10-10T18:25:49Z
+    ts = datetime.datetime.now().isoformat()
+    ts = ts.split('.')[0]
+    ts += 'Z'
+    return ts
+
+
+def run_command(cmd):
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (so, se) = p.communicate()
+    return (p.returncode, so, se)
+
+
+def read_gzip_json(cfile):
+    try:
+        with gzip.open(cfile, 'r') as f:
+            jdata = json.loads(f.read())
+    except json.decoder.JSONDecodeError as e:
+        logger.error(e)
+        import epdb; epdb.st()
+    return jdata
+
+def write_gzip_json(cfile, data):
+    #try:
+    #    json.dumps(data)
+    #except TypeError as e:
+    #    logger.error(e)
+    #    import epdb; epdb.st()
+    with gzip.open(cfile, 'wb') as f:
+        f.write(json.dumps(data).encode('utf-8'))
+
+
+class GithubMock(object):
+
+    TOKEN = None
+    SHIPPABLE_TOKEN = None
+    proxy = False
+    usecache = False
+    generate = False
+    fixturedir = '/tmp/bot.fixtures'
+    botcache = '/data/ansibot.production.cache'
+    use_botcache = True
+    ifile = '/tmp/fakeup/issues.p'
+    efile = '/tmp/fakeup/events.p'
+    ISSUES = {'github': {}}
+    PULLS = {'github': {}}
+    EVENTS = {}
+    REACTIONS = {}
+    COMMENTS = {}
+    HISTORY = {}
+    STATUS_HASHES = {}
+    PR_STATUSES = {}
+    PULL_COMMITS = {}
+    COMMITS = {}
+    GITCOMMITS = {}
+    FILES = {}
+    META = {}
+    RUNNUMBERS = {}
+    RUNIDS = {}
+    JOBS = {}
+    JOBIDS = {}
+    JOBTESTREPORTS = {}
+
+    def __init__(self):
+        '''
+        if self.use_botcache:
+            self.load_ansibot_cache()
+        else:
+            self.seed_fake_issues()
+        '''
+        pass
+
+    @property
+    def is_proxy(self):
+        if self.proxy:
+            return True
+        return False
+
+    def tokenized_request(self, url, data=None, method='GET', headers=None, pages=None, paginate=True, pagecount=0):
+        logger.info('(F) %s' % url)
+        _headers = {}
+        if self.TOKEN:
+            _headers['Authorization'] = 'token %s' % self.TOKEN
+
+        # reactions
+        _headers['Accept'] = 'application/vnd.github.squirrel-girl-preview+json'
+        if headers is not None:
+            for k,v in headers.items():
+                _headers[k] = v
+
+        if method == 'GET':        
+            rr = requests.get(url, headers=_headers)
+        elif method == 'POST':
+            rr = requests.post(url, data=data, headers=_headers)
+
+        if rr.headers.get('Status') == '204 No Content':
+            data = None
+        else:
+            try:
+                data = rr.json()
+            except json.decoder.JSONDecodeError as e:
+                logger.error(e)
+                import epdb; epdb.st()
+
+        rheaders = dict(rr.headers)
+
+        if not paginate:
+            return (rheaders, data)
+
+        # exit early if enough pages were collected
+        pagecount += 1
+        if pages and pagecount >= pages:
+            return (rheaders, data)
+
+        if 'Link' in rheaders:
+            links = self.extract_header_links(rheaders)
+            if links.get('next'):
+                (_headers, _data) = self.tokenized_request(links['next'], pagecount=pagecount)
+                data += _data
+
+        return (rheaders, data)
+
+    # CACHED PROXY
+    def cached_tokenized_request(self, url, data=None, method='GET', headers=None, pages=None, pagecount=0, context='api.github.com'):
+        '''fetch a raw github api url, cache the result, munge it and send it back'''
+
+        path = url.replace('https://%s/' % context, '')
+        path = path.split('/')
+        if path[-1] != 'graphql':
+            dtype = path[-1]
+            path = '/'.join(path[:-1])
+            fixdir = os.path.join(self.fixturedir, context, path)
+        else:
+            fixdir = os.path.join(self.fixturedir, context, 'graphql')
+            m = hashlib.md5()
+            m.update(data)
+            dtype = m.hexdigest()
+
+        loaded = False
+        if self.usecache:
+            try:
+                rheaders,rdata = self.read_fixture(fixdir, dtype)
+                loaded = True
+            except RequestNotCachedException:
+                pass
+
+        if not loaded and self.is_proxy:
+            rheaders, rdata = self.tokenized_request(
+                url,
+                data=data,
+                method=method,
+                headers=headers,
+                pages=pages,
+                pagecount=pagecount,
+                paginate=False
+            )
+
+            if not os.path.exists(fixdir):
+                os.makedirs(fixdir)
+            self.write_fixture(fixdir, dtype, rdata, rheaders, compress=True)
+            loaded = True
+
+        if not loaded:
+            raise Exception(
+                '%s was not cached and the server is not in proxy mode' % url
+            )
+
+        new_headers = self.replace_data_urls(rheaders)
+        new_data = self.replace_data_urls(rdata)
+        return new_headers,new_data
+
+    def extract_header_links(self, headers):
+
+        links = {}
+        for line in headers['Link'].split(','):
+            parts = line.split(';')
+            rel = parts[-1].split('"')[1]
+            link = parts[0].replace('<', '').replace('>', '').strip()
+            links[rel] = link
+
+        #import epdb; epdb.st()
+        return links
+
+    def fetch_first_issue_number(self, org, repo):
+        iurl = 'https://api.github.com/repos/%s/%s/issues' % (org, repo)
+        (issues_headers, issues) = self.tokenized_request(iurl, pages=1) 
+        return issues[0]['number']
+
+
+    def get_issue_fixture(self, org, repo, number, ftype=None):
+        '''Read the fixture(s) from disk and send them back'''
+        logger.info('load %s %s %s' % (org, repo, number))
+        number = int(number)
+        bd = os.path.join(self.fixturedir, 'repos', org, repo, str(number))
+        fns = sorted(glob.glob('%s/*' % bd))
+        fns = [x for x in fns if ftype in os.path.basename(x)]
+
+        result = None
+        headers = None
+
+        for fn in fns:
+            if fn.endswith('.gz'):
+                data = read_gzip_json(fn)
+            else:
+                with open(fn, 'r') as f:
+                    try:
+                        data = json.loads(f.read())
+                    except ValueError as e:
+                        logger.error('unable to parse %s' % fn)
+                        raise Exception(e)
+
+            data = self.replace_data_urls(data)
+            if '.headers' in fn:
+                headers = data.copy()
+            else:
+                result = data.copy()
+
+        return headers,result
+
+
+    def replace_data_urls(self, data):
+        '''Point ALL urls back to this instance instead of the origin'''
+        data = json.dumps(data)
+        data = data.replace('https://api.github.com', BASEURL)
+        data = data.replace('https://github.com', BASEURL)
+        data = data.replace('https://api.shippable.com', BASEURL)
+        data = data.replace('https://app.shippable.com', BASEURL)
+        data = json.loads(data)
+        return data
+
+    def read_fixture(self, directory, fixture_type):
+
+        hfn = os.path.join(directory, '%s.headers.json' % fixture_type)
+        if not os.path.exists(hfn):
+            hfn += '.gz'
+            if not os.path.exists(hfn):
+                raise RequestNotCachedException
+            logger.debug('read %s' % hfn)
+            headers = read_gzip_json(hfn)
+        else:
+            logger.debug('read %s' % hfn)
+            with open(hfn, 'r') as f:
+                headers = json.load(f.read())
+
+        dfn = os.path.join(directory, '%s.json' % fixture_type)
+        if not os.path.exists(dfn):
+            dfn += '.gz'
+            if not os.path.exists(dfn):
+                raise RequestNotCachedException
+            logger.debug('read %s' % dfn)
+            data = read_gzip_json(dfn)
+        else:
+            logger.debug('read %s' % dfn)
+            with open(dfn, 'r') as f:
+                data = json.load(f.read())
+
+        return headers,data
+
+    def write_fixture(self, directory, fixture_type, data, headers, compress=False):
+
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
+        if compress:
+            hfn = os.path.join(directory, '%s.headers.json.gz' % fixture_type)
+            write_gzip_json(hfn, headers)
+            dfn = os.path.join(directory, '%s.json.gz' % fixture_type)
+            write_gzip_json(dfn, data)
+        else:
+            with open(os.path.join(directory, '%s.json' % fixture_type), 'w') as f:
+                f.write(json.dumps(data, indent=2, sort_keys=True))
+            with open(os.path.join(directory, '%s.headers.json' % fixture_type), 'w') as f:
+                f.write(json.dumps(headers, indent=2, sort_keys=True))
+
+
+GM = GithubMock()
+
+
+########################################################
+#   ROUTES
+########################################################
+
+
+@app.route('/rate_limit')
+def rate_limit():
+    reset = int(time.time()) + 10
+    rl = {
+        'resources': {
+            'core': {
+                'limit': 5000,
+                'remaining': 5000,
+                'reset': reset
+            }
+        },
+        'rate': {
+            'limit': 5000,
+            'remaining': 5000,
+            'reset': reset
+        }
+    }
+    return jsonify(rl)
+
+
+
+@app.route('/<path:path>', methods=['GET', 'POST'])
+def abstract_path(path):
+
+    logger.info('# ABSTRACT PATH! - %s' % path)
+    path_parts = path.split('/')
+    logger.info(six.text_type((len(path_parts),path_parts)))
+    logger.info(request.path)
+
+    # context defines the baseurl
+    thiscontext = None
+    if path_parts[0] in ['jobs', 'runs']:
+        thiscontext = 'api.shippable.com'
+    else:
+        thiscontext = 'api.github.com'
+
+    # tell the mocker what the real url should be
+    thisurl = request.url.replace(
+            'http://localhost:5000',
+            'https://%s' % thiscontext
+    )
+    logger.debug('thisurl: %s' % thisurl)
+    headers, data = GM.cached_tokenized_request(
+        thisurl,
+        method=request.method.upper(),
+        data=request.data,
+        context=thiscontext
+    )
+    resp = jsonify(data)
+    for k,v in headers.items():
+        if not k.startswith('X-'):
+            continue
+        resp.headers[k] = v
+    resp.headers['ETag'] = headers.get('ETag', DEFAULT_ETAG)
+    return resp
+
+
+def main():
+
+    action_choices = [
+        'load',  # use fixtures but do not make requests
+        'proxy', # make requests and cache results
+        'smart', # use fixtures when possible
+    ]
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('action', choices=action_choices)
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--token', '--github_token', default=None)
+    parser.add_argument('--shippable_token', default=None)
+    parser.add_argument('--fixtures', '--fixturedir', default='/tmp/bot.fixtures')
+    args = parser.parse_args()
+
+    GM.fixturedir = args.fixtures
+
+    if args.action == 'proxy':
+        GM.proxy = True
+        GM.usecache = False
+        GM.TOKEN = args.token
+        GM.SHIPPABLE_TOKEN = args.shippable_token
+    elif args.action == 'smart':
+        GM.proxy = True
+        GM.usecache = True
+        GM.TOKEN = args.token
+        GM.SHIPPABLE_TOKEN = args.shippable_token
+
+    else:
+        GM.proxy = False
+        GM.usecache = True
+
+    app.run(debug=args.debug, host='0.0.0.0')
+
+
+if __name__ == "__main__":
+    main()
