@@ -7,4 +7,3 @@ RUN pip install -r /requirements.txt
 WORKDIR /src
 EXPOSE 80 443 5000
 CMD ["python3", "github-proxy", "smart"]
-

@@ -96,7 +96,9 @@ class GithubMock(object):
     proxy = False
     usecache = False
     generate = False
+    writedeltas = False
     fixturedir = '/tmp/bot.fixtures'
+    deltadir = '/tmp/bot.deltas'
     botcache = '/data/ansibot.production.cache'
     use_botcache = True
     ifile = '/tmp/fakeup/issues.p'
@@ -146,6 +148,7 @@ class GithubMock(object):
         if headers is not None:
             for k,v in headers.items():
                 _headers[k] = v
+
 
         if method == 'GET':        
             rr = requests.get(url, headers=_headers)
@@ -203,6 +206,32 @@ class GithubMock(object):
             except RequestNotCachedException:
                 pass
 
+        # add new data locally
+        if method in ['POST', 'UPDATE', 'DELETE'] and  path[-1] != 'graphql':
+            jdata = data
+            try:
+                jdata = json.loads(data)
+            except json.decoder.JSONDecodeError:
+                pass
+            self.handle_change(context, url, headers, data, method=method)
+            #import epdb; epdb.st()
+            return {},{}
+
+        if not loaded and method == 'GET' and not self.is_proxy:
+            # issues without labels won't have a labels file, so we have to return empty data
+
+            # get the issue data for verification
+            if url.endswith('/labels'):
+                iheaders, idata = self.get_cached_issue_data(url=url)
+                if not idata['labels']:
+                    return {},[]
+            else:
+                import epdb; epdb.st()
+
+        # merge in the deltas
+        if loaded and not self.is_proxy and method == 'GET':
+            rdata = self.get_changes(context, url, rdata)
+
         if not loaded and self.is_proxy:
             rheaders, rdata = self.tokenized_request(
                 url,
@@ -220,6 +249,7 @@ class GithubMock(object):
             loaded = True
 
         if not loaded:
+
             raise Exception(
                 '%s was not cached and the server is not in proxy mode' % url
             )
@@ -227,6 +257,196 @@ class GithubMock(object):
         new_headers = self.replace_data_urls(rheaders)
         new_data = self.replace_data_urls(rdata)
         return new_headers,new_data
+
+
+    def get_cached_issue_data(self, namespace=None, repo=None, number=None, url=None):
+        # https://api.github.com/repos/ansible/ansible/issues/55062/labels
+        urlparts = url.split('/')
+        numix = None
+        for idx,urlpart in enumerate(urlparts):
+            if urlpart.isdigit():
+                numix = idx
+                break
+        diskpath = urlparts[2:numix]
+        fixdir = os.path.join(self.fixturedir, '/'.join(diskpath))
+        (headers, data) = self.read_fixture(fixdir, urlparts[numix])
+        return (headers,data)
+
+    def get_changes(self, context, url, data):
+        path = url.replace('https://%s/' % context, '')
+        path = path.split('/')
+
+
+        if not 'issues' in path and not 'issue' in path and not 'pull' in path and not 'pulls' in path:
+            return data
+
+        numix = None
+        for idx,_path in enumerate(path):
+            if _path.isdigit():
+                numix = idx
+                break
+
+        if numix is None:
+            import epdb; epdb.st()
+
+        inumber = path[numix]
+
+        dtype = path[-1]
+        _path = '/'.join(path[:numix+1])
+        fixdir = os.path.join(self.deltadir, context, _path)
+        if not os.path.exists(fixdir):
+            return data
+
+        efile = os.path.join(fixdir, 'events.json')
+        if not os.path.exists(efile):
+            return data
+
+        with open(efile, 'r') as f:
+            events = json.loads(f.read())
+
+        dtype = None
+        if url.endswith(inumber):
+            dtype = 'issue'
+        elif url.endswith('events'):
+            dtype = 'events'
+        elif url.endswith('comments'):
+            dtype = 'comments'
+
+        for event in events:
+            if dtype == 'events':
+                data.append(event)
+                continue
+            if dtype == 'comments' and event['event'] == 'commented':
+                data.append(event)
+                continue
+            if dtype == 'comments' and event['event'] != 'commented':
+                continue
+            if dtype == 'issue':
+                data['updated_at'] = event['created_at']
+                if event['event'] == 'labeled':
+                    found = False
+                    for label in data['labels']:
+                        if label['name'] == event['label']['name']:
+                            found = True
+                            break
+                    if not found:
+                        data['labels'].append({'name': event['label']['name']})
+                elif event['event'] == 'unlabeled':
+                    found = False
+                    for label in data['labels']:
+                        if label['name'] == event['label']['name']:
+                            found = label
+                            break
+                    if found:
+                        data['labels'].remove(found)
+                elif event['event'] == 'commented':
+                    data['comments'] += 1
+                #else:
+                #    import epdb; epdb.st()
+
+                continue
+
+            import epdb; epdb.st()
+
+        #import epdb; epdb.st()
+        return data
+
+    def handle_change(self, context, url, headers, data, method=None):
+
+        # GET POST UPDATE DELETE
+
+        path = url.replace('https://%s/' % context, '')
+        path = path.split('/')
+
+        jdata = None
+        try:
+            jdata = json.loads(data)
+        except Exception:
+            pass
+
+        if method.lower() == 'delete':
+            if path[-2] == 'labels':
+                jdata = [path[-1]]
+                path = path[:-1]
+            else:
+                import epdb; epdb.st()
+
+        dtype = path[-1]
+        _path = '/'.join(path[:-1])
+        fixdir = os.path.join(self.deltadir, context, _path)
+        if not os.path.exists(fixdir):
+            os.makedirs(fixdir)
+
+        #fixfile = os.path.join(fixdir, '%s.json' % path[-1])
+        efile = os.path.join(fixdir, 'events.json')
+
+        #ldata = []
+        #if os.path.exists(fixfile):
+        #    with open(fixfile, 'r') as f:
+        #        ldata = json.loads(f.read())
+
+        edata = []
+        if os.path.exists(efile):
+            with open(efile, 'r') as f:
+                edata = json.loads(f.read())
+
+        if path[-1] == 'labels':
+            #jdata = json.loads(data)
+
+            if isinstance(jdata, dict) and 'labels' in jdata:
+                labels = jdata['labels']
+            else:
+                labels = jdata[:]
+            for label in labels:
+                thisevent = self.get_new_event()
+                thisevent['actor']['login'] = 'ansibot'
+                thisevent['actor']['url'] = 'https://api.github.com/users/ansibot'
+                thisevent['user']['login'] = 'ansibot'
+                thisevent['user']['url'] = 'https://api.github.com/users/ansibot'
+                if method.lower() == 'post':
+                    thisevent['event'] = 'labeled'
+                elif method.lower() == 'delete':
+                    thisevent['event'] = 'unlabeled'
+                thisevent['label'] = {'name': label}
+                edata.append(thisevent)
+
+        elif path[-1] == 'comments':
+            #jdata = json.loads(data)
+            thisevent = self.get_new_event()
+            thisevent['actor']['login'] = 'ansibot'
+            thisevent['actor']['url'] = 'https://api.github.com/users/ansibot'
+            thisevent['user']['login'] = 'ansibot'
+            thisevent['user']['url'] = 'https://api.github.com/users/ansibot'
+            thisevent['event'] = 'commented'
+            thisevent['body'] = jdata['body'] 
+            edata.append(thisevent)
+
+        else:
+            import epdb; epdb.st()
+
+        with open(efile, 'w') as f:
+            f.write(json.dumps(edata, indent=2))
+
+
+    def get_new_event(self):
+        thisevent = {
+            'id': None,
+            'node_id': None,
+            'url': None,
+            'actor': {
+                'login': None,
+                'url': None,
+            },
+            'user': {
+                'login': None,
+                'url': None
+            },
+            'event': None,
+            'commit_id': None,
+            'commit_url': None,
+            'created_at': datetime.datetime.now().isoformat(),
+        }
+        return thisevent
 
     def extract_header_links(self, headers):
 
@@ -361,8 +581,11 @@ def rate_limit():
 
 
 
-@app.route('/<path:path>', methods=['GET', 'POST'])
+@app.route('/<path:path>', methods=['GET', 'POST', 'DELETE', 'UPDATE'])
 def abstract_path(path):
+
+    # 127.0.0.1 - - [12/Apr/2019 13:54:04] "GET /repos/ansible/ansible/git/commits/6a7ba80b421da4e3fe70badb67c1164e6ea5d75e HTTP/1.1" 200 -
+    # 127.0.0.1 - - [12/Apr/2019 13:54:06] "DELETE /repos/ansible/ansible/issues/55055/labels/needs_revision HTTP/1.1" 405 -
 
     logger.info('# ABSTRACT PATH! - %s' % path)
     path_parts = path.split('/')
@@ -388,6 +611,9 @@ def abstract_path(path):
         data=request.data,
         context=thiscontext
     )
+
+    pprint(data)
+
     resp = jsonify(data)
     whitelist = ['ETag', 'Link']
     for k,v in headers.items():
@@ -412,9 +638,11 @@ def main():
     parser.add_argument('--token', '--github_token', default=None)
     parser.add_argument('--shippable_token', default=None)
     parser.add_argument('--fixtures', '--fixturedir', default='/tmp/bot.fixtures')
+    parser.add_argument('--deltas', '--deltadir', help="where to store changes from POST data")
     args = parser.parse_args()
 
-    GM.fixturedir = args.fixtures
+    GM.deltadir = os.path.expanduser(args.deltas)
+    GM.fixturedir = os.path.expanduser(args.fixtures)
 
     if args.action == 'proxy':
         GM.proxy = True
@@ -430,6 +658,7 @@ def main():
     else:
         GM.proxy = False
         GM.usecache = True
+        GM.writedeltas = True
 
     app.run(debug=args.debug, host='0.0.0.0')
 
