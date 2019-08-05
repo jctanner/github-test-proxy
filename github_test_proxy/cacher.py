@@ -1,28 +1,16 @@
 #!/usr/bin/env python
 
 
-import argparse
 import datetime
 import glob
 import gzip
 import hashlib
 import json
 import os
-import pickle
-import random
-import requests
-import six
 import subprocess
-import time
 
+import requests
 from logzero import logger
-from pprint import pprint
-from flask import Flask
-from flask import jsonify
-from flask import request
-
-
-app = Flask(__name__)
 
 
 BASEURL = 'http://localhost:5000'
@@ -48,7 +36,7 @@ DEFAULT_ETAG = 'a00049ba79152d03380c34652f2cb612'
 #	_search accepts POST
 
 ########################################################
-#   MOCK 
+#   MOCK
 ########################################################
 
 class RequestNotCachedException(Exception):
@@ -80,55 +68,28 @@ def read_gzip_json(cfile):
     return jdata
 
 def write_gzip_json(cfile, data):
-    #try:
-    #    json.dumps(data)
-    #except TypeError as e:
-    #    logger.error(e)
-    #    import epdb; epdb.st()
     with gzip.open(cfile, 'wb') as f:
         f.write(json.dumps(data).encode('utf-8'))
 
 
-class GithubMock(object):
+class ProxyCacher:
 
     TOKEN = None
     SHIPPABLE_TOKEN = None
+
+    # make remote calls to github for uncached data
     proxy = False
+
+    # use local ondisk cache from fixtures+deltas
     usecache = False
-    generate = False
-    writedeltas = False
+
+    # where to store and load the data fetched from github
     fixturedir = '/tmp/bot.fixtures'
+
+    # where to store the new events created by POST
     deltadir = '/tmp/bot.deltas'
-    botcache = '/data/ansibot.production.cache'
-    use_botcache = True
-    ifile = '/tmp/fakeup/issues.p'
-    efile = '/tmp/fakeup/events.p'
-    ISSUES = {'github': {}}
-    PULLS = {'github': {}}
-    EVENTS = {}
-    REACTIONS = {}
-    COMMENTS = {}
-    HISTORY = {}
-    STATUS_HASHES = {}
-    PR_STATUSES = {}
-    PULL_COMMITS = {}
-    COMMITS = {}
-    GITCOMMITS = {}
-    FILES = {}
-    META = {}
-    RUNNUMBERS = {}
-    RUNIDS = {}
-    JOBS = {}
-    JOBIDS = {}
-    JOBTESTREPORTS = {}
 
     def __init__(self):
-        '''
-        if self.use_botcache:
-            self.load_ansibot_cache()
-        else:
-            self.seed_fake_issues()
-        '''
         pass
 
     @property
@@ -137,7 +98,17 @@ class GithubMock(object):
             return True
         return False
 
-    def tokenized_request(self, url, data=None, method='GET', headers=None, pages=None, paginate=True, pagecount=0):
+    def tokenized_request(
+            self,
+            url,
+            data=None,
+            method='GET',
+            headers=None,
+            pages=None,
+            paginate=True,
+            pagecount=0
+        ):
+
         logger.info('(F) %s' % url)
         _headers = {}
         if self.TOKEN:
@@ -154,11 +125,11 @@ class GithubMock(object):
         ]
         _headers['Accept'] = ','.join(accepts)
         if headers is not None:
-            for k,v in headers.items():
+            for k, v in headers.items():
                 _headers[k] = v
 
 
-        if method == 'GET':        
+        if method == 'GET':
             rr = requests.get(url, headers=_headers)
         elif method == 'POST':
             rr = requests.post(url, data=data, headers=_headers)
@@ -191,7 +162,17 @@ class GithubMock(object):
         return (rheaders, data)
 
     # CACHED PROXY
-    def cached_tokenized_request(self, url, data=None, method='GET', headers=None, pages=None, pagecount=0, context='api.github.com'):
+    def cached_tokenized_request(
+            self,
+            url,
+            data=None,
+            method='GET',
+            headers=None,
+            pages=None,
+            pagecount=0,
+            context='api.github.com'
+        ):
+
         '''fetch a raw github api url, cache the result, munge it and send it back'''
 
         path = url.replace('https://%s/' % context, '')
@@ -209,7 +190,7 @@ class GithubMock(object):
         loaded = False
         if self.usecache:
             try:
-                rheaders,rdata = self.read_fixture(fixdir, dtype)
+                rheaders, rdata = self.read_fixture(fixdir, dtype)
                 loaded = True
             except RequestNotCachedException:
                 pass
@@ -223,7 +204,7 @@ class GithubMock(object):
                 pass
             self.handle_change(context, url, headers, data, method=method)
             #import epdb; epdb.st()
-            return {},{}
+            return {}, {}
 
         if not loaded and method == 'GET' and not self.is_proxy:
             # issues without labels won't have a labels file, so we have to return empty data
@@ -232,12 +213,15 @@ class GithubMock(object):
             if url.endswith('/labels'):
                 iheaders, idata = self.get_cached_issue_data(url=url)
                 if not idata['labels']:
-                    return {},[]
+                    return {}, []
             else:
+                print('HUH?')
                 import epdb; epdb.st()
 
         # merge in the deltas
-        if loaded and not self.is_proxy and method == 'GET':
+        #if loaded and not self.is_proxy and method == 'GET':
+        #    rdata = self.get_changes(context, url, rdata)
+        if self.usecache:
             rdata = self.get_changes(context, url, rdata)
 
         if not loaded and self.is_proxy:
@@ -264,21 +248,21 @@ class GithubMock(object):
 
         new_headers = self.replace_data_urls(rheaders)
         new_data = self.replace_data_urls(rdata)
-        return new_headers,new_data
+        return new_headers, new_data
 
 
     def get_cached_issue_data(self, namespace=None, repo=None, number=None, url=None):
         # https://api.github.com/repos/ansible/ansible/issues/55062/labels
         urlparts = url.split('/')
         numix = None
-        for idx,urlpart in enumerate(urlparts):
+        for idx, urlpart in enumerate(urlparts):
             if urlpart.isdigit():
                 numix = idx
                 break
         diskpath = urlparts[2:numix]
         fixdir = os.path.join(self.fixturedir, '/'.join(diskpath))
         (headers, data) = self.read_fixture(fixdir, urlparts[numix])
-        return (headers,data)
+        return (headers, data)
 
     def get_changes(self, context, url, data):
         path = url.replace('https://%s/' % context, '')
@@ -289,7 +273,7 @@ class GithubMock(object):
             return data
 
         numix = None
-        for idx,_path in enumerate(path):
+        for idx, _path in enumerate(path):
             if _path.isdigit():
                 numix = idx
                 break
@@ -354,7 +338,7 @@ class GithubMock(object):
 
                 continue
 
-            import epdb; epdb.st()
+            #import epdb; epdb.st()
 
         #import epdb; epdb.st()
         return data
@@ -502,7 +486,7 @@ class GithubMock(object):
             else:
                 result = data.copy()
 
-        return headers,result
+        return headers, result
 
 
     def replace_data_urls(self, data):
@@ -541,7 +525,7 @@ class GithubMock(object):
             with open(dfn, 'r') as f:
                 data = json.load(f.read())
 
-        return headers,data
+        return headers, data
 
     def write_fixture(self, directory, fixture_type, data, headers, compress=False):
 
@@ -558,118 +542,3 @@ class GithubMock(object):
                 f.write(json.dumps(data, indent=2, sort_keys=True))
             with open(os.path.join(directory, '%s.headers.json' % fixture_type), 'w') as f:
                 f.write(json.dumps(headers, indent=2, sort_keys=True))
-
-
-GM = GithubMock()
-
-
-########################################################
-#   ROUTES
-########################################################
-
-
-@app.route('/rate_limit')
-def rate_limit():
-    reset = int(time.time()) + 10
-    rl = {
-        'resources': {
-            'core': {
-                'limit': 5000,
-                'remaining': 5000,
-                'reset': reset
-            }
-        },
-        'rate': {
-            'limit': 5000,
-            'remaining': 5000,
-            'reset': reset
-        }
-    }
-    return jsonify(rl)
-
-
-
-@app.route('/<path:path>', methods=['GET', 'POST', 'DELETE', 'UPDATE'])
-def abstract_path(path):
-
-    # 127.0.0.1 - - [12/Apr/2019 13:54:04] "GET /repos/ansible/ansible/git/commits/6a7ba80b421da4e3fe70badb67c1164e6ea5d75e HTTP/1.1" 200 -
-    # 127.0.0.1 - - [12/Apr/2019 13:54:06] "DELETE /repos/ansible/ansible/issues/55055/labels/needs_revision HTTP/1.1" 405 -
-
-    logger.info('# ABSTRACT PATH! - %s' % path)
-    path_parts = path.split('/')
-    logger.info(six.text_type((len(path_parts),path_parts)))
-    logger.info(request.path)
-
-    # context defines the baseurl
-    thiscontext = None
-    if path_parts[0] in ['jobs', 'runs']:
-        thiscontext = 'api.shippable.com'
-    else:
-        thiscontext = 'api.github.com'
-
-    # tell the mocker what the real url should be
-    thisurl = request.url.replace(
-            'http://localhost:5000',
-            'https://%s' % thiscontext
-    )
-    logger.debug('thisurl: %s' % thisurl)
-    headers, data = GM.cached_tokenized_request(
-        thisurl,
-        method=request.method.upper(),
-        data=request.data,
-        context=thiscontext
-    )
-
-    pprint(data)
-
-    resp = jsonify(data)
-    whitelist = ['ETag', 'Link']
-    for k,v in headers.items():
-        if not k.startswith('X-') and k not in whitelist:
-            continue
-        resp.headers.set(k, v)
-    #pprint(dict(resp.headers))
-    return resp
-
-
-def main():
-
-    action_choices = [
-        'load',  # use fixtures but do not make requests
-        'proxy', # make requests and cache results
-        'smart', # use fixtures when possible
-    ]
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=action_choices)
-    parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--token', '--github_token', default=None)
-    parser.add_argument('--shippable_token', default=None)
-    parser.add_argument('--fixtures', '--fixturedir', default='/tmp/bot.fixtures')
-    parser.add_argument('--deltas', '--deltadir', help="where to store changes from POST data")
-    args = parser.parse_args()
-
-    GM.deltadir = os.path.expanduser(args.deltas)
-    GM.fixturedir = os.path.expanduser(args.fixtures)
-
-    if args.action == 'proxy':
-        GM.proxy = True
-        GM.usecache = False
-        GM.TOKEN = args.token
-        GM.SHIPPABLE_TOKEN = args.shippable_token
-    elif args.action == 'smart':
-        GM.proxy = True
-        GM.usecache = True
-        GM.TOKEN = args.token
-        GM.SHIPPABLE_TOKEN = args.shippable_token
-
-    else:
-        GM.proxy = False
-        GM.usecache = True
-        GM.writedeltas = True
-
-    app.run(debug=args.debug, host='0.0.0.0')
-
-
-if __name__ == "__main__":
-    main()

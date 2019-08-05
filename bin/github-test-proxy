@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+
+
+from github_proxy.webapp import main
+
+
+main()
