@@ -6,7 +6,7 @@ import os
 import tempfile
 from unittest.mock import patch
 
-from github_proxy.cacher import ProxyCacher
+from github_test_proxy.cacher import ProxyCacher
 
 
 ###############################################################################
@@ -47,7 +47,7 @@ def test_init():
 
 def test_cached_tokenized_request_get():
     with tempfile.TemporaryDirectory() as tmpdir:
-        with patch('github_proxy.proxy.requests', RequestsMocker()) as mock_requests:
+        with patch('github_test_proxy.cacher.requests', RequestsMocker()) as mock_requests:
             GM = ProxyCacher()
             GM.proxy = True
             GM.fixturedir = os.path.join(tmpdir, 'fixtures')
@@ -96,7 +96,7 @@ def test_cached_tokenized_request_get():
 
 def test_cached_tokenized_request_post():
     with tempfile.TemporaryDirectory() as tmpdir:
-        with patch('github_proxy.proxy.requests', RequestsMocker()) as mock_requests:
+        with patch('github_test_proxy.cacher.requests', RequestsMocker()) as mock_requests:
             GM = ProxyCacher()
             GM.proxy = True
             GM.fixturedir = os.path.join(tmpdir, 'fixtures')
