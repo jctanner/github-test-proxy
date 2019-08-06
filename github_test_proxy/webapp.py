@@ -25,7 +25,8 @@ from github_test_proxy.cacher import ProxyCacher
 
 
 GM = ProxyCacher()
-app = Flask(__name__)
+#app = Flask(__name__)
+app = Flask('test')
 
 
 ########################################################
@@ -77,6 +78,10 @@ def abstract_path(path):
             'http://localhost:5000',
             'https://%s' % thiscontext
     )
+    thisurl = request.url.replace(
+            'http://localhost:6000',
+            'https://%s' % thiscontext
+    )
     logger.debug('thisurl: %s' % thisurl)
     headers, data = GM.cached_tokenized_request(
         thisurl,
@@ -84,6 +89,7 @@ def abstract_path(path):
         data=request.data,
         context=thiscontext
     )
+    logger.info('finished cached_tokenized_request')
 
     pprint(data)
 
@@ -93,6 +99,9 @@ def abstract_path(path):
         if not k.startswith('X-') and k not in whitelist:
             continue
         resp.headers.set(k, v)
+
+    logger.debug('response data: %s' % data)
+
     #pprint(dict(resp.headers))
     return resp
 
@@ -108,6 +117,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=action_choices,
         help="which mode to run the proxy in")
+    parser.add_argument('--port', default=5000, type=int)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--token', '--github_token', default=None)
     parser.add_argument('--shippable_token', default=None)
@@ -138,7 +148,9 @@ def main():
         GM.usecache = True
         GM.writedeltas = True
 
-    app.run(debug=args.debug, host='0.0.0.0')
+    GM.BASEURL = 'http://localhost:%s' % args.port
+
+    app.run(debug=args.debug, host='0.0.0.0', port=args.port)
 
 
 if __name__ == "__main__":

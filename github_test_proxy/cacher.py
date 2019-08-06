@@ -13,7 +13,7 @@ import requests
 from logzero import logger
 
 
-BASEURL = 'http://localhost:5000'
+#BASEURL = 'http://localhost:5000'
 ERROR_TIMER = 0
 
 TOKENS = {
@@ -74,6 +74,7 @@ def write_gzip_json(cfile, data):
 
 class ProxyCacher:
 
+    BASEURL = 'http://localhost:5000'
     TOKEN = None
     SHIPPABLE_TOKEN = None
 
@@ -109,7 +110,7 @@ class ProxyCacher:
             pagecount=0
         ):
 
-        logger.info('(F) %s' % url)
+        logger.info('(FETCH) [%s] %s' % (method, url))
         _headers = {}
         if self.TOKEN:
             _headers['Authorization'] = 'token %s' % self.TOKEN
@@ -128,10 +129,11 @@ class ProxyCacher:
             for k, v in headers.items():
                 _headers[k] = v
 
-
         if method == 'GET':
+            logger.info('GET %s' % url)
             rr = requests.get(url, headers=_headers)
         elif method == 'POST':
+            logger.info('POST %s' % url)
             rr = requests.post(url, data=data, headers=_headers)
 
         if rr.headers.get('Status') == '204 No Content':
@@ -156,6 +158,7 @@ class ProxyCacher:
         if 'Link' in rheaders:
             links = self.extract_header_links(rheaders)
             if links.get('next'):
+                logger.debug('NEXT: %s' % links.get('next'))
                 (_headers, _data) = self.tokenized_request(links['next'], pagecount=pagecount)
                 data += _data
 
@@ -175,6 +178,9 @@ class ProxyCacher:
 
         '''fetch a raw github api url, cache the result, munge it and send it back'''
 
+        rdata = None
+        loaded = False
+
         path = url.replace('https://%s/' % context, '')
         path = path.split('/')
         if path[-1] != 'graphql':
@@ -187,7 +193,6 @@ class ProxyCacher:
             m.update(data)
             dtype = m.hexdigest()
 
-        loaded = False
         if self.usecache:
             try:
                 rheaders, rdata = self.read_fixture(fixdir, dtype)
@@ -248,6 +253,9 @@ class ProxyCacher:
 
         new_headers = self.replace_data_urls(rheaders)
         new_data = self.replace_data_urls(rdata)
+
+        logger.debug('returning from cached_tokenized_request')
+
         return new_headers, new_data
 
 
@@ -410,7 +418,7 @@ class ProxyCacher:
             thisevent['user']['login'] = 'ansibot'
             thisevent['user']['url'] = 'https://api.github.com/users/ansibot'
             thisevent['event'] = 'commented'
-            thisevent['body'] = jdata['body'] 
+            thisevent['body'] = jdata['body']
             edata.append(thisevent)
 
         else:
@@ -454,7 +462,7 @@ class ProxyCacher:
 
     def fetch_first_issue_number(self, org, repo):
         iurl = 'https://api.github.com/repos/%s/%s/issues' % (org, repo)
-        (issues_headers, issues) = self.tokenized_request(iurl, pages=1) 
+        (issues_headers, issues) = self.tokenized_request(iurl, pages=1)
         return issues[0]['number']
 
 
@@ -492,10 +500,10 @@ class ProxyCacher:
     def replace_data_urls(self, data):
         '''Point ALL urls back to this instance instead of the origin'''
         data = json.dumps(data)
-        data = data.replace('https://api.github.com', BASEURL)
-        data = data.replace('https://github.com', BASEURL)
-        data = data.replace('https://api.shippable.com', BASEURL)
-        data = data.replace('https://app.shippable.com', BASEURL)
+        data = data.replace('https://api.github.com', self.BASEURL)
+        data = data.replace('https://github.com', self.BASEURL)
+        data = data.replace('https://api.shippable.com', self.BASEURL)
+        data = data.replace('https://app.shippable.com', self.BASEURL)
         data = json.loads(data)
         return data
 
